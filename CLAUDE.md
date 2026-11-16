@@ -62,4 +62,10 @@ Use descriptive, lowercase names with underscores:
 
 - Ask the user rather than guessing
 - If a tool returns an error, report it clearly — don't retry silently
+
+## Tools Registered Before Nuke Was Running
+
+If the MCP server started before the Nuke addon was running, it can't tell the Nuke version or variant, so it registers **every** tool. Its server instructions then say "Nuke was not reachable when this server started". Tools reconnect on their own once the addon is up, but the tool list stays unfiltered for the whole session.
+
+So if a NukeX-only or Nuke 17+ tool (e.g. `import_splat`, `create_annotation`, `setup_bigcat`, tracking, deep, CopyCat) fails with an unknown-command or unknown-node-class error, tell the user the tool probably isn't supported by their Nuke version and that the list is unfiltered because the session started before Nuke. Suggest running `/mcp` and reconnecting `nuke-mcp` (or restarting the Claude session) while Nuke and its NukeMCP server are running, to get the correct tool list.
 - If you don't know what a specific Nuke knob does, say so
