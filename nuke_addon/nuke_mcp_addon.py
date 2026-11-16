@@ -84,13 +84,18 @@ def _handle_ping(params: dict) -> dict:
 def _handle_get_script_info(params: dict) -> dict:
     nuke = _get_nuke()
     root = nuke.root()
+    fmt = root.format()
+    # Nuke's short format string: "width height pixel_aspect [name]"
+    format_str = f"{fmt.width()} {fmt.height()} {fmt.pixelAspect():g}"
+    if fmt.name():
+        format_str += f" {fmt.name()}"
     return {
         "status": "ok",
         "result": {
             "name": root.name(),
             "frame_range": [root["first_frame"].value(), root["last_frame"].value()],
             "fps": root["fps"].value(),
-            "format": str(root.format()),
+            "format": format_str,
             "colorspace": root["colorManagement"].value(),
             "node_count": len(nuke.allNodes()),
         },
@@ -758,7 +763,7 @@ class NukeMCPServer:
         """Call func in Nuke's main thread (GUI) or via queue (headless)."""
         nuke = _get_nuke()
         if nuke.GUI:
-            return nuke.executeInMainThread(func, args=args)
+            return nuke.executeInMainThreadWithResult(func, args=args)
         if self._main_queue is not None:
             result_q = queue.Queue()
             self._main_queue.put((func, args, result_q))
@@ -784,7 +789,8 @@ class NukeMCPServer:
         self._send(client, handshake)
 
         buffer = b""
-        while self._running:
+        rejected = False
+        while self._running and not rejected:
             try:
                 chunk = client.recv(1024 * 1024)
             except OSError:
@@ -795,11 +801,17 @@ class NukeMCPServer:
             buffer += chunk
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
+                # # Local patch: drop the connection on any non-JSON line, so an HTTP request
+                # # from a web page (cross-protocol attack) can never reach its JSON body.
                 try:
                     command = json.loads(line.decode("utf-8"))
-                except json.JSONDecodeError as e:
-                    self._send(client, {"status": "error", "error": f"Invalid JSON: {e}"})
-                    continue
+                    if not isinstance(command, dict):
+                        raise ValueError("command is not a JSON object")
+                except (UnicodeDecodeError, ValueError) as e:
+                    self._send(client, {"status": "error", "error": f"Invalid JSON, closing: {e}"})
+                    self._emit_log("Rejected non-JSON input; connection closed")
+                    rejected = True
+                    break
 
                 cmd_type = command.get("type", "")
                 params = command.get("params", {})
