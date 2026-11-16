@@ -3,16 +3,26 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kleer001/nuke-mcp/blob/main/LICENSE"><img src="https://img.shields.io/github/license/kleer001/nuke-mcp?color=blue" alt="License: MIT"/></a>
+  <a href="https://github.com/ChrispsCode/nuke-mcp/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ChrispsCode/nuke-mcp?color=blue" alt="License: MIT"/></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white" alt="Python 3.10+"/></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-green?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6Ii8+PC9zdmc+" alt="MCP Compatible"/></a>
   <a href="https://www.foundry.com/products/nuke-family/nuke"><img src="https://img.shields.io/badge/Nuke-17.0-E8A317?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48L3N2Zz4=&logoColor=white" alt="Nuke 17.0"/></a>
-  <a href="https://github.com/kleer001/nuke-mcp/commits/main"><img src="https://img.shields.io/github/last-commit/kleer001/nuke-mcp" alt="Last Commit"/></a>
-  <a href="https://github.com/kleer001/nuke-mcp/issues"><img src="https://img.shields.io/github/issues/kleer001/nuke-mcp" alt="Issues"/></a>
-  <a href="https://github.com/kleer001/nuke-mcp/network/members"><img src="https://img.shields.io/github/forks/kleer001/nuke-mcp?style=social" alt="Forks"/></a>
-  <a href="https://github.com/kleer001/nuke-mcp/watchers"><img src="https://img.shields.io/github/watchers/kleer001/nuke-mcp?style=social" alt="Watchers"/></a>
-  <a href="https://github.com/kleer001/nuke-mcp/stargazers"><img src="https://img.shields.io/github/stars/kleer001/nuke-mcp?style=social" alt="GitHub Stars"/></a>
+  <a href="https://github.com/ChrispsCode/nuke-mcp/commits/main"><img src="https://img.shields.io/github/last-commit/ChrispsCode/nuke-mcp" alt="Last Commit"/></a>
+  <a href="https://github.com/ChrispsCode/nuke-mcp/issues"><img src="https://img.shields.io/github/issues/ChrispsCode/nuke-mcp" alt="Issues"/></a>
+  <a href="https://github.com/ChrispsCode/nuke-mcp/network/members"><img src="https://img.shields.io/github/forks/ChrispsCode/nuke-mcp?style=social" alt="Forks"/></a>
+  <a href="https://github.com/ChrispsCode/nuke-mcp/watchers"><img src="https://img.shields.io/github/watchers/ChrispsCode/nuke-mcp?style=social" alt="Watchers"/></a>
+  <a href="https://github.com/ChrispsCode/nuke-mcp/stargazers"><img src="https://img.shields.io/github/stars/ChrispsCode/nuke-mcp?style=social" alt="GitHub Stars"/></a>
 </p>
+
+> **This is a fork of [kleer001/nuke-mcp](https://github.com/kleer001/nuke-mcp).** All credit for NukeMCP goes to kleer001; this fork adds a few fixes and tweaks on top:
+>
+> - **Nuke GUI fix:** the addon now works in an interactive Nuke session (before, every connection was dropped after the handshake).
+> - **Reconnects on its own:** the MCP server starts even if Nuke isn't running yet, and reconnects on the next tool call when the addon is started or restarted.
+> - **Stop means stop:** stopping the addon in Nuke now disconnects the client.
+> - **Safer socket:** the addon drops the connection on any non-JSON input, so a web page can't drive Nuke through it.
+> - `get_script_info` returns a readable format (e.g. `1920 1080 1 HD_1080`), `.mcp.json` connects to a real Nuke instead of the mock, and the Nodes toolbar menu has an icon.
+>
+> Tested in NukeX 15.2 (GUI). [Compare this fork with the original](https://github.com/kleer001/nuke-mcp/compare/main...ChrispsCode:nuke-mcp:main).
 
 NukeMCP connects AI assistants (Claude, ChatGPT, local LLMs) to a running Nuke session via the [Model Context Protocol](https://modelcontextprotocol.io). Describe what you want in plain English, and the AI creates, connects, and configures nodes in your comp.
 
@@ -26,12 +36,12 @@ NukeMCP connects AI assistants (Claude, ChatGPT, local LLMs) to a running Nuke s
 
 **Linux / macOS:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/kleer001/nuke-mcp/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/ChrispsCode/nuke-mcp/main/scripts/bootstrap.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/kleer001/nuke-mcp/main/scripts/bootstrap.bat -OutFile bootstrap.bat; .\bootstrap.bat"
+powershell -c "irm https://raw.githubusercontent.com/ChrispsCode/nuke-mcp/main/scripts/bootstrap.bat -OutFile bootstrap.bat; .\bootstrap.bat"
 ```
 
 The bootstrap clones the repo, installs [uv](https://docs.astral.sh/uv/), creates a venv, installs deps, and prints next steps for the Nuke addon and MCP client.
@@ -42,7 +52,7 @@ The bootstrap clones the repo, installs [uv](https://docs.astral.sh/uv/), create
 #### 1. Clone and install
 
 ```bash
-git clone https://github.com/kleer001/nuke-mcp.git
+git clone https://github.com/ChrispsCode/nuke-mcp.git
 cd nuke-mcp
 uv sync
 ```
@@ -224,12 +234,13 @@ Every entry follows the same format: **what we tried, what surprised us, and wha
 
 This file is baked into Claude's context, so the AI builds on previous experience instead of starting from scratch. The more you use NukeMCP, the smarter it gets.
 
-**Got recipes to share?** As you work with NukeMCP, your AI will add entries to its own `BEST_PRACTICES.md`. If you've accumulated useful ones, [open an issue](https://github.com/kleer001/nuke-mcp/issues/new?labels=best-practice&title=Best+Practices+Contribution&body=Paste+your+BEST_PRACTICES.md+contents+below%0A%0A---%0A%0A) and paste your file — we'll merge the good stuff in for everyone.
+**Got recipes to share?** As you work with NukeMCP, your AI will add entries to its own `BEST_PRACTICES.md`. If you've accumulated useful ones, [open an issue](https://github.com/ChrispsCode/nuke-mcp/issues/new?labels=best-practice&title=Best+Practices+Contribution&body=Paste+your+BEST_PRACTICES.md+contents+below%0A%0A---%0A%0A) and paste your file — we'll merge the good stuff in for everyone.
 
 ## Acknowledgments
 
 This project builds on the work of several open-source contributors:
 
+- **[kleer001/nuke-mcp](https://github.com/kleer001/nuke-mcp)** — the original NukeMCP that this fork is built on.
 - **[dughogan/nuke_mcp](https://github.com/dughogan/nuke_mcp)** — the right architecture and the right spirit. Clean, compositor-readable code with a clear socket-based design. Doug Hogan's [fxphd course](https://www.fxphd.com/details/707/) made the concept accessible to the compositing community.
 - **[flowagent-sh/nuke-mcp](https://github.com/flowagent-sh/nuke-mcp)** — demonstrated that the feature set can be production-grade, with camera tracking, deep compositing, and ML integration.
 - **[kleer001/houdini-mcp](https://github.com/kleer001/houdini-mcp)** — the persistent memory system, CLAUDE.md behavioral rules, BM25-based RAG, bidirectional events, and the proof that a DCC MCP can be a serious piece of software engineering.

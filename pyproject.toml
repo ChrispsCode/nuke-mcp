@@ -20,9 +20,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kleer001/nuke-mcp"
-Repository = "https://github.com/kleer001/nuke-mcp"
-Issues = "https://github.com/kleer001/nuke-mcp/issues"
+Homepage = "https://github.com/ChrispsCode/nuke-mcp"
+Repository = "https://github.com/ChrispsCode/nuke-mcp"
+Issues = "https://github.com/ChrispsCode/nuke-mcp/issues"
 
 [dependency-groups]
 dev = [
