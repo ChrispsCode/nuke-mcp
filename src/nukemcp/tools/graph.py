@@ -141,7 +141,8 @@ def register(server: NukeMCPServer):
 
         Args:
             code: Python code to execute. The `nuke` module is available.
-                  Assign to `result` to return a value.
+                  Assign to `result` to return a value. A dict is returned
+                  as-is; any other value comes back as {"result": value}.
             confirm: Must be True to proceed.
         """
         if not confirm:
@@ -154,4 +155,7 @@ def register(server: NukeMCPServer):
                     "then call again with confirm=True."
                 ),
             }
-        return conn.send_command("execute_python", {"code": code})
+        result = conn.send_command("execute_python", {"code": code})
+        # The tool's output schema is a dict, so FastMCP rejects scalars,
+        # lists and None. Wrap them instead of failing after the code ran.
+        return result if isinstance(result, dict) else {"result": result}

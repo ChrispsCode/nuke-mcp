@@ -96,3 +96,25 @@ def test_server_starts_without_nuke():
     # Version is unknown, so gating is permissive
     assert "create_tracker" in tool_names
     assert "import_splat" in tool_names
+
+
+def _call_tool(mcp, name: str, args: dict):
+    """Call a tool through an in-memory FastMCP client, so output validation runs."""
+    from fastmcp import Client
+
+    async def call():
+        async with Client(mcp) as client:
+            return await client.call_tool(name, args)
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(call())
+    finally:
+        loop.close()
+
+
+def test_execute_python_wraps_non_dict_result(server):
+    """A non-dict result (the mock returns a string) must not break the dict output schema."""
+    result = _call_tool(server, "execute_python", {"code": "result = 42", "confirm": True})
+    assert isinstance(result.structured_content, dict)
+    assert "result" in result.structured_content

@@ -116,3 +116,17 @@ def test_version_gating(integration_conn):
     assert conn.handshake is not None
     assert "nuke_version" in conn.handshake
     assert "variant" in conn.handshake
+
+
+def test_execute_python_top_level_names_visible_in_nested_scopes(integration_conn):
+    """Top-level imports and variables must be visible inside comprehensions and functions."""
+    code = (
+        "import os\n"
+        "base = 10\n"
+        "def add(x):\n"
+        "    return base + x + len(os.sep)\n"
+        "result = [add(i) for i in range(3)]\n"
+    )
+    resp = integration_conn.send({"type": "execute_python", "params": {"code": code}})
+    assert resp["status"] == "ok", resp
+    assert resp["result"] == [11, 12, 13]
