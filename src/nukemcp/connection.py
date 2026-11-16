@@ -26,9 +26,13 @@ class NukeConnection:
     event messages pushed by the addon.
     """
 
-    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
+    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
+                 auto_reconnect: bool = False):
         self.host = host
         self.port = port
+        # When True, send() reconnects on demand if the connection is down
+        # (Nuke started late, or the addon was stopped/restarted).
+        self.auto_reconnect = auto_reconnect
         self.sock: socket.socket | None = None
         self.handshake: dict | None = None
         self._buffer = b""
@@ -49,6 +53,10 @@ class NukeConnection:
 
         Retries with exponential backoff on failure.
         """
+        # Close any old socket first (wakes its reader), then wait for the
+        # reader to exit so it can't read from or close the new socket.
+        self._close_socket()
+        self._stop_reader()
         last_error = None
         for attempt in range(retries):
             try:
@@ -64,6 +72,8 @@ class NukeConnection:
                     self.host,
                     self.port,
                 )
+                # Drop responses left over from a previous connection
+                self._clear_responses()
                 # Switch to blocking mode and start the reader thread
                 self.sock.settimeout(None)
                 self._start_reader()
@@ -88,6 +98,8 @@ class NukeConnection:
 
     def send(self, command: dict, timeout: float = 10.0) -> dict:
         """Send a JSON command and return the JSON response."""
+        if not self.sock and self.auto_reconnect:
+            self._reconnect()
         if not self.sock:
             raise NukeConnectionError("Not connected to Nuke addon")
 
@@ -114,14 +126,33 @@ class NukeConnection:
 
     def disconnect(self):
         """Cleanly disconnect from the Nuke addon."""
-        self._stop_reader()
         self._close_socket()
+        self._stop_reader()
         self.handshake = None
         log.info("Disconnected from Nuke addon")
 
     @property
     def is_connected(self) -> bool:
         return self.sock is not None
+
+    def _reconnect(self):
+        """Try once to (re)connect, raising a clear error if the addon isn't up."""
+        log.info("Not connected; trying to reconnect to Nuke addon at %s:%d", self.host, self.port)
+        try:
+            self.connect(retries=1)
+        except NukeConnectionError as e:
+            raise NukeConnectionError(
+                f"Nuke addon not reachable at {self.host}:{self.port}. "
+                "Make sure Nuke is running and the NukeMCP server is started "
+                f"in its panel, then try again. ({e})"
+            ) from None
+
+    def _clear_responses(self):
+        while True:
+            try:
+                self._response_queue.get_nowait()
+            except queue.Empty:
+                return
 
     def _start_reader(self):
         """Start the background thread that reads all incoming messages."""
@@ -155,19 +186,30 @@ class NukeConnection:
     def _read_message(self) -> dict:
         """Read a newline-delimited JSON message from the socket."""
         while b"\n" not in self._buffer:
-            chunk = self.sock.recv(RECV_BUFFER)
+            sock = self.sock
+            if sock is None:
+                raise NukeConnectionError("Not connected to Nuke addon")
+            chunk = sock.recv(RECV_BUFFER)
             if not chunk:
-                self._close_socket()
+                self._close_socket(only=sock)
                 raise NukeConnectionError("Connection closed by Nuke addon")
             self._buffer += chunk
 
         line, self._buffer = self._buffer.split(b"\n", 1)
         return json.loads(line.decode("utf-8"))
 
-    def _close_socket(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except OSError:
-                pass
-            self.sock = None
+    def _close_socket(self, only: socket.socket | None = None):
+        """Close the current socket. With `only`, close it only if it is still current."""
+        sock = self.sock
+        if sock is None or (only is not None and sock is not only):
+            return
+        self.sock = None
+        try:
+            # Wake a reader thread blocked in recv() on this socket
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass

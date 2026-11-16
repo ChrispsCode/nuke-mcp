@@ -85,3 +85,14 @@ def test_server_old_version_no_17_tools():
     assert "create_annotation" not in tool_names
     # But NukeX tools for older versions should be
     assert "create_tracker" in tool_names
+
+
+def test_server_starts_without_nuke():
+    """With no addon listening, the server still starts with all tools registered."""
+    port = _find_free_port()
+    mcp = build_server(port=port)
+    tool_names = _get_tool_names(mcp)
+    assert "get_script_info" in tool_names
+    # Version is unknown, so gating is permissive
+    assert "create_tracker" in tool_names
+    assert "import_splat" in tool_names

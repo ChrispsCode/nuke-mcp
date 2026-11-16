@@ -64,3 +64,12 @@ def test_handshake_connection(connection):
     assert connection.handshake["type"] == "handshake"
     assert "nuke_version" in connection.handshake
     assert "variant" in connection.handshake
+
+
+def test_unknown_version_is_permissive():
+    from nukemcp.version import NukeVersion
+    v = NukeVersion.unknown()
+    assert not v.known
+    assert v.is_nukex
+    assert v.at_least(99)
+    assert "unknown" in str(v)

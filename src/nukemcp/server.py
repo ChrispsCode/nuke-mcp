@@ -11,7 +11,7 @@ import sys
 
 from fastmcp import FastMCP
 
-from nukemcp.connection import NukeConnection, DEFAULT_HOST, DEFAULT_PORT
+from nukemcp.connection import NukeConnection, NukeConnectionError, DEFAULT_HOST, DEFAULT_PORT
 from nukemcp.version import NukeVersion, parse_version
 from nukemcp.tools import graph, script, comp, render, templates, batch, tracking, threed, deep, ml, splats, annotations
 
@@ -55,23 +55,43 @@ def build_server(
         mock_server.start()
         log.info("Mock Nuke server started on port %d (%s %s)", port, mock_variant, mock_version)
 
-    conn = NukeConnection(host, port)
+    conn = NukeConnection(host, port, auto_reconnect=True)
 
     try:
         handshake = conn.connect()
+    except NukeConnectionError:
+        if mock_server:
+            mock_server.stop()
+            raise
+        # Start anyway: tools reconnect on demand once the addon is running.
+        log.warning(
+            "Nuke addon not reachable at %s:%d; starting without it. "
+            "Tools will connect when Nuke's NukeMCP server is started.",
+            host, port,
+        )
+        handshake = None
     except Exception:
         if mock_server:
             mock_server.stop()
         raise
 
-    version = parse_version(handshake)
-    log.info("Connected to %s", version)
+    if handshake:
+        version = parse_version(handshake)
+        log.info("Connected to %s", version)
+        status = f"You are connected to {version}. "
+    else:
+        version = NukeVersion.unknown()
+        status = (
+            "Nuke was not reachable when this server started. Tools connect "
+            "automatically; if one reports that the addon is not reachable, ask "
+            "the user to start Nuke and the NukeMCP server in its panel. "
+        )
 
     mcp = FastMCP(
         "NukeMCP",
         instructions=(
-            f"You are connected to {version}. "
-            "Use the available tools to inspect and modify the Nuke script. "
+            status
+            + "Use the available tools to inspect and modify the Nuke script. "
             "Always check the current state with get_script_info or get_node_info "
             "before making changes. Never delete nodes or execute code without "
             "user confirmation (set confirm=True only after the user agrees)."
@@ -108,6 +128,8 @@ def build_server(
 
     # Auto-populate project memory on connection
     try:
+        if not conn.is_connected:
+            raise NukeConnectionError("not connected at startup")
         info = conn.send_command("get_script_info")
         script_name = info.get("name", "untitled")
         # Derive a clean project name from the script filename

@@ -15,9 +15,18 @@ class NukeVersion:
     minor: int
     patch: str  # e.g., "v1", "v5"
     variant: str  # "Nuke", "NukeX", "NukeStudio"
+    # False when the server started before Nuke was reachable. Gating is then
+    # permissive (all tools registered) and the addon reports anything unsupported.
+    known: bool = True
+
+    @classmethod
+    def unknown(cls) -> NukeVersion:
+        return cls(major=0, minor=0, patch="v0", variant="Nuke", known=False)
 
     @property
     def is_nukex(self) -> bool:
+        if not self.known:
+            return True
         return self.variant in ("NukeX", "NukeStudio")
 
     @property
@@ -25,9 +34,13 @@ class NukeVersion:
         return self.variant == "NukeStudio"
 
     def at_least(self, major: int, minor: int = 0) -> bool:
+        if not self.known:
+            return True
         return (self.major, self.minor) >= (major, minor)
 
     def __str__(self) -> str:
+        if not self.known:
+            return "Nuke (version unknown, not yet connected)"
         return f"{self.variant} {self.major}.{self.minor}{self.patch}"
 
 

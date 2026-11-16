@@ -682,6 +682,7 @@ class NukeMCPServer:
     def __init__(self, port: int = DEFAULT_PORT):
         self.port = port
         self._server_sock: socket.socket | None = None
+        self._client: socket.socket | None = None
         self._running = False
         self._thread: threading.Thread | None = None
         self._main_queue: queue.Queue | None = None
@@ -737,6 +738,18 @@ class NukeMCPServer:
             except OSError:
                 pass
             self._server_sock = None
+        # Also drop the connected client. Otherwise its handler thread stays
+        # blocked in recv() and still runs the next command after a stop.
+        client = self._client
+        if client:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                client.close()
+            except OSError:
+                pass
         log.info("NukeMCP server stopped")
 
     def _serve(self):
@@ -777,10 +790,13 @@ class NukeMCPServer:
         global _event_client_socket
         client.settimeout(None)
         _event_client_socket = client
+        self._client = client
 
         # Send handshake
         handshake = self._run_in_nuke(_handshake_data)
         if not isinstance(handshake, dict):
+            _event_client_socket = None
+            self._client = None
             try:
                 client.close()
             except OSError:
@@ -829,7 +845,9 @@ class NukeMCPServer:
                 self._send(client, response)
                 self._emit_log(f"-> {response.get('status', '?')}")
 
-        _event_client_socket = None
+        if _event_client_socket is client:
+            _event_client_socket = None
+        self._client = None
         try:
             client.close()
         except OSError:
