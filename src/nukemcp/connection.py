@@ -1,5 +1,6 @@
 """Socket connection to the Nuke addon."""
 
+import itertools
 import json
 import logging
 import queue
@@ -12,6 +13,11 @@ log = logging.getLogger(__name__)
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 54321
 RECV_BUFFER = 1024 * 1024  # 1MB
+CONNECT_TIMEOUT = 10.0  # seconds to connect and receive the handshake
+
+# Queued by the reader thread when its connection ends, so a send() waiting
+# for a response fails straight away instead of sitting out its timeout.
+_DISCONNECTED = "_disconnected"
 
 
 class NukeConnectionError(Exception):
@@ -40,6 +46,15 @@ class NukeConnection:
         self._event_handler: callable | None = None
         self._reader_thread: threading.Thread | None = None
         self._reader_running = False
+        # Each request carries an id that the addon echoes back, so a late
+        # response to a timed-out request is never taken as the answer to the
+        # next one.
+        self._request_ids = itertools.count(1)
+        # Bumped on every connect, so a disconnect notice from an old
+        # connection's reader can't fail a request on the new one.
+        self._generation = 0
+        # One request in flight at a time: responses share one queue.
+        self._send_lock = threading.Lock()
 
     def set_event_handler(self, handler):
         """Set a callback for event messages pushed by the addon.
@@ -48,10 +63,13 @@ class NukeConnection:
         """
         self._event_handler = handler
 
-    def connect(self, retries: int = 3, base_delay: float = 1.0) -> dict:
+    def connect(self, retries: int = 3, base_delay: float = 1.0,
+                timeout: float = CONNECT_TIMEOUT) -> dict:
         """Connect to the Nuke addon and return the handshake data.
 
-        Retries with exponential backoff on failure.
+        Retries with exponential backoff on failure. `timeout` bounds each
+        attempt, including the wait for the handshake (which needs Nuke's main
+        thread, so a busy Nuke can hold it up).
         """
         # Close any old socket first (wakes its reader), then wait for the
         # reader to exit so it can't read from or close the new socket.
@@ -61,7 +79,7 @@ class NukeConnection:
         for attempt in range(retries):
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.settimeout(10.0)
+                self.sock.settimeout(timeout)
                 self.sock.connect((self.host, self.port))
                 self._buffer = b""
                 self.handshake = self._read_message()
@@ -98,24 +116,57 @@ class NukeConnection:
 
     def send(self, command: dict, timeout: float = 10.0) -> dict:
         """Send a JSON command and return the JSON response."""
-        if not self.sock and self.auto_reconnect:
-            self._reconnect()
-        if not self.sock:
-            raise NukeConnectionError("Not connected to Nuke addon")
+        with self._send_lock:
+            if not self.sock and self.auto_reconnect:
+                self._reconnect()
+            sock = self.sock
+            if not sock:
+                raise NukeConnectionError("Not connected to Nuke addon")
 
-        msg = json.dumps(command) + "\n"
-        try:
-            self.sock.sendall(msg.encode("utf-8"))
-        except OSError as e:
-            self._close_socket()
-            raise NukeConnectionError(f"Communication error: {e}") from e
+            generation = self._generation
+            request_id = next(self._request_ids)
+            # Anything still queued answers an earlier request that timed out.
+            self._clear_responses()
+            msg = json.dumps({**command, "id": request_id}) + "\n"
+            try:
+                sock.sendall(msg.encode("utf-8"))
+            except OSError as e:
+                self._close_socket(only=sock)
+                raise NukeConnectionError(f"Communication error: {e}") from e
 
-        try:
-            return self._response_queue.get(timeout=timeout)
-        except queue.Empty:
-            raise NukeConnectionError(
-                f"Timeout waiting for response after {timeout}s"
-            ) from None
+            return self._wait_for_response(request_id, generation, command, timeout)
+
+    def _wait_for_response(self, request_id: int, generation: int,
+                           command: dict, timeout: float) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise queue.Empty
+                response = self._response_queue.get(timeout=remaining)
+            except queue.Empty:
+                raise NukeConnectionError(
+                    f"Timeout waiting for response after {timeout}s. Nuke may "
+                    "still be busy running the command."
+                ) from None
+
+            if response.get("type") == _DISCONNECTED:
+                if response.get("generation") != generation:
+                    continue  # Notice from an older connection
+                raise NukeConnectionError(
+                    f"Connection to Nuke addon lost while waiting for "
+                    f"'{command.get('type')}': {response.get('error')}"
+                )
+            response_id = response.get("id")
+            # An addon from before request ids doesn't echo them; take its
+            # responses as they come.
+            if response_id is None or response_id == request_id:
+                return response
+            log.warning(
+                "Discarding stale response to request %s (waiting for %s)",
+                response_id, request_id,
+            )
 
     def send_command(self, cmd_type: str, params: dict | None = None, timeout: float = 10.0) -> dict:
         """Send a command and return the result, raising on error."""
@@ -156,8 +207,11 @@ class NukeConnection:
 
     def _start_reader(self):
         """Start the background thread that reads all incoming messages."""
+        self._generation += 1
         self._reader_running = True
-        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, args=(self.sock, self._generation), daemon=True,
+        )
         self._reader_thread.start()
 
     def _stop_reader(self):
@@ -167,26 +221,41 @@ class NukeConnection:
             self._reader_thread.join(timeout=2.0)
         self._reader_thread = None
 
-    def _reader_loop(self):
-        """Background loop: read messages and route events vs responses."""
-        while self._reader_running:
-            try:
-                msg = self._read_message()
-            except (NukeConnectionError, OSError):
-                break
-            if msg.get("type") == "event":
-                if self._event_handler:
-                    try:
-                        self._event_handler(msg)
-                    except Exception:
-                        log.exception("Event handler error")
-            else:
-                self._response_queue.put(msg)
+    def _reader_loop(self, sock: socket.socket, generation: int):
+        """Background loop: read messages and route events vs responses.
 
-    def _read_message(self) -> dict:
-        """Read a newline-delimited JSON message from the socket."""
+        However the loop ends, it closes its socket, so the next send()
+        reconnects instead of writing to a connection nobody is reading.
+        """
+        reason = "connection closed"
+        try:
+            while self._reader_running:
+                msg = self._read_message(sock)
+                if msg.get("type") == "event":
+                    if self._event_handler:
+                        try:
+                            self._event_handler(msg)
+                        except Exception:
+                            log.exception("Event handler error")
+                else:
+                    self._response_queue.put(msg)
+        except (NukeConnectionError, OSError) as e:
+            reason = str(e) or reason
+        except Exception as e:
+            # A malformed message means the stream can't be trusted any more
+            log.exception("Reader thread failed; dropping the connection")
+            reason = f"{type(e).__name__}: {e}"
+        finally:
+            self._close_socket(only=sock)
+            self._response_queue.put(
+                {"type": _DISCONNECTED, "generation": generation, "error": reason}
+            )
+
+    def _read_message(self, sock: socket.socket | None = None) -> dict:
+        """Read a newline-delimited JSON message from `sock` (default: the current socket)."""
         while b"\n" not in self._buffer:
-            sock = self.sock
+            if sock is None:
+                sock = self.sock
             if sock is None:
                 raise NukeConnectionError("Not connected to Nuke addon")
             chunk = sock.recv(RECV_BUFFER)

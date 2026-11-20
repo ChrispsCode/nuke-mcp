@@ -392,6 +392,22 @@ class MockNukeState:
         return {"status": "ok", "result": {"subscribed": event_types}}
 
 
+def _close_listener(sock: socket.socket):
+    """Close a listening socket, waking a thread blocked in accept() on it.
+
+    close() alone doesn't wake accept() on Linux, and the port stays bound
+    until it returns. shutdown() does.
+    """
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
 class MockNukeServer:
     """A mock TCP server that behaves like the Nuke addon for offline development."""
 
@@ -407,23 +423,22 @@ class MockNukeServer:
         self._running = False
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
-        self._client_socket: socket.socket | None = None
-        self._client_lock = threading.Lock()
+        # Connected clients, each with a send lock (like the real addon)
+        self._clients: dict[socket.socket, threading.Lock] = {}
+        self._clients_lock = threading.Lock()
+        # Commands run one at a time, as on Nuke's main thread
+        self._state_lock = threading.Lock()
 
     def push_event(self, event_type: str, data: dict):
-        """Push an event to the connected client (for testing).
+        """Push an event to every connected client (for testing).
 
         Simulates what the real Nuke addon does when a callback fires.
         """
-        if self._client_socket is None:
-            return
+        with self._clients_lock:
+            clients = list(self._clients)
         event = {"type": "event", "event_type": event_type, "data": data}
-        msg = json.dumps(event) + "\n"
-        with self._client_lock:
-            try:
-                self._client_socket.sendall(msg.encode("utf-8"))
-            except OSError:
-                pass
+        for client in clients:
+            self._send(client, event)
 
     def start(self):
         if self._running:
@@ -437,13 +452,14 @@ class MockNukeServer:
     def stop(self):
         self._running = False
         if self._server_sock:
-            try:
-                self._server_sock.close()
-            except OSError:
-                pass
-        # Drop the connected client too, matching the real addon's stop()
-        client = self._client_socket
-        if client:
+            _close_listener(self._server_sock)
+        # Wait for the accept loop, so start() can bind the port again
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
+        # Drop the connected clients too, matching the real addon's stop()
+        with self._clients_lock:
+            clients = list(self._clients)
+        for client in clients:
             try:
                 client.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -454,7 +470,7 @@ class MockNukeServer:
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_sock.settimeout(1.0)
         self._server_sock.bind(("127.0.0.1", self.port))
-        self._server_sock.listen(1)
+        self._server_sock.listen(5)
         self._ready.set()
 
         while self._running:
@@ -465,11 +481,13 @@ class MockNukeServer:
             except OSError:
                 break
 
-            self._handle_client(client)
+            # One thread per client, like the real addon
+            threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
 
     def _handle_client(self, client: socket.socket):
         client.settimeout(None)
-        self._client_socket = client
+        with self._clients_lock:
+            self._clients[client] = threading.Lock()
 
         # Send handshake
         self._send(client, self.state.handshake())
@@ -491,10 +509,14 @@ class MockNukeServer:
                 except json.JSONDecodeError as e:
                     self._send(client, {"status": "error", "error": f"Invalid JSON: {e}"})
                     continue
-                response = self.state.handle(command)
+                with self._state_lock:
+                    response = self.state.handle(command)
+                if "id" in command:
+                    response = dict(response, id=command["id"])
                 self._send(client, response)
 
-        self._client_socket = None
+        with self._clients_lock:
+            self._clients.pop(client, None)
         try:
             client.close()
         except OSError:
@@ -502,7 +524,11 @@ class MockNukeServer:
 
     def _send(self, client: socket.socket, data: dict):
         msg = json.dumps(data) + "\n"
-        with self._client_lock:
+        with self._clients_lock:
+            lock = self._clients.get(client)
+        if lock is None:
+            return
+        with lock:
             try:
                 client.sendall(msg.encode("utf-8"))
             except OSError:

@@ -17,6 +17,11 @@ from nukemcp.tools import graph, script, comp, render, templates, batch, trackin
 
 log = logging.getLogger("nukemcp")
 
+# Claude Code gives an MCP server 30s to start. The startup connect must fit
+# well inside that, even when Nuke is up but slow to send its handshake (busy
+# main thread). Tools reconnect on demand, so a quick give-up loses nothing.
+STARTUP_CONNECT_TIMEOUT = 5.0
+
 
 class NukeMCPServer:
     """Holds the FastMCP instance and shared state (connection, version)."""
@@ -58,7 +63,7 @@ def build_server(
     conn = NukeConnection(host, port, auto_reconnect=True)
 
     try:
-        handshake = conn.connect()
+        handshake = conn.connect(retries=1, timeout=STARTUP_CONNECT_TIMEOUT)
     except NukeConnectionError:
         if mock_server:
             mock_server.stop()
@@ -130,7 +135,7 @@ def build_server(
     try:
         if not conn.is_connected:
             raise NukeConnectionError("not connected at startup")
-        info = conn.send_command("get_script_info")
+        info = conn.send_command("get_script_info", timeout=STARTUP_CONNECT_TIMEOUT)
         script_name = info.get("name", "untitled")
         # Derive a clean project name from the script filename
         project_name = script_name.rsplit("/", 1)[-1].rsplit(".", 1)[0] or "untitled"

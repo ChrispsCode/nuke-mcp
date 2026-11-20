@@ -553,22 +553,62 @@ def _handle_list_annotations(params: dict) -> dict:
 
 
 
-_event_client_socket = None
-_event_socket_lock = threading.Lock()
+# # Every connected MCP client, each with its own send lock: responses (socket
+# # threads) and events (Nuke's main thread) must not interleave on one socket.
+_clients: dict = {}
+_clients_lock = threading.Lock()
 _registered_callbacks = set()
 
 
-def _push_event(event_type: str, data: dict):
-    """Push an event to the connected MCP client."""
-    if _event_client_socket is None:
+def _add_client(client: socket.socket):
+    with _clients_lock:
+        _clients[client] = threading.Lock()
+
+
+def _remove_client(client: socket.socket):
+    with _clients_lock:
+        _clients.pop(client, None)
+
+
+def _to_json(data: dict) -> str:
+    """Serialise a message, never raising.
+
+    Knob values include Nuke objects (a Viewer's Matrix4 wipe_position, Format
+    knobs), so they go out as their str(). Before this, one such value raised
+    out of the socket thread and killed the server until Nuke restarted.
+    """
+    try:
+        return json.dumps(data, default=str)
+    except (TypeError, ValueError) as e:
+        error = {"status": "error", "error": f"Response could not be serialised: {e}"}
+        if isinstance(data, dict) and "id" in data:
+            error["id"] = data["id"]
+        return json.dumps(error)
+
+
+def _send_to(client: socket.socket, data: dict):
+    """Send one message to a client, serialised with anything else sent to it."""
+    msg = (_to_json(data) + "\n").encode("utf-8")
+    with _clients_lock:
+        lock = _clients.get(client)
+    if lock is None:
         return
-    event = {"type": "event", "event_type": event_type, "data": data}
-    msg = json.dumps(event) + "\n"
-    with _event_socket_lock:
+    with lock:
         try:
-            _event_client_socket.sendall(msg.encode("utf-8"))
+            client.sendall(msg)
         except OSError:
             pass
+
+
+def _push_event(event_type: str, data: dict):
+    """Push an event to every connected MCP client."""
+    with _clients_lock:
+        clients = list(_clients)
+    if not clients:
+        return
+    event = {"type": "event", "event_type": event_type, "data": data}
+    for client in clients:
+        _send_to(client, event)
 
 
 def _on_node_created():
@@ -679,13 +719,34 @@ class _Signaller(QObject):
     log_signal = Signal(str)
 
 
+def _close_listener(sock: socket.socket):
+    """Close a listening socket, waking a thread blocked in accept() on it.
+
+    close() alone doesn't wake accept() on Linux, and the port stays bound
+    until it returns. shutdown() does.
+    """
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
 class NukeMCPServer:
-    """TCP socket server that listens for JSON commands from the MCP server."""
+    """TCP socket server that listens for JSON commands from the MCP server.
+
+    Each client gets its own thread, so several MCP servers (one per Claude
+    session) can be connected at once. Commands still run one at a time, on
+    Nuke's main thread.
+    """
 
     def __init__(self, port: int = DEFAULT_PORT):
         self.port = port
         self._server_sock: socket.socket | None = None
-        self._client: socket.socket | None = None
+        self._clients: set = set()
         self._running = False
         self._thread: threading.Thread | None = None
         self._main_queue: queue.Queue | None = None
@@ -736,15 +797,14 @@ class NukeMCPServer:
     def stop(self):
         self._running = False
         if self._server_sock:
-            try:
-                self._server_sock.close()
-            except OSError:
-                pass
+            _close_listener(self._server_sock)
             self._server_sock = None
-        # Also drop the connected client. Otherwise its handler thread stays
-        # blocked in recv() and still runs the next command after a stop.
-        client = self._client
-        if client:
+        # # Wait for the accept loop, so a new server can bind the port straight away
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
+        # # Also drop the connected clients. Otherwise their handler threads stay
+        # # blocked in recv() and still run the next command after a stop.
+        for client in list(self._clients):
             try:
                 client.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -760,7 +820,7 @@ class NukeMCPServer:
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_sock.settimeout(1.0)
         self._server_sock.bind(("127.0.0.1", self.port))
-        self._server_sock.listen(1)
+        self._server_sock.listen(5)
         self._emit_log(f"Listening on port {self.port}")
 
         while self._running:
@@ -771,9 +831,20 @@ class NukeMCPServer:
             except OSError:
                 break
 
-            self._emit_log(f"Client connected from {addr[0]}:{addr[1]}")
+            # # A thread per client: serving clients one after another let an
+            # # idle Claude session block every other session's connection.
+            threading.Thread(
+                target=self._serve_client, args=(client, addr), daemon=True,
+            ).start()
+
+    def _serve_client(self, client: socket.socket, addr):
+        self._emit_log(f"Client connected from {addr[0]}:{addr[1]}")
+        try:
             self._handle_client(client)
-            self._emit_log("Client disconnected")
+        except Exception as e:
+            self._emit_log(f"Client handler error: {type(e).__name__}: {e}")
+        finally:
+            self._emit_log(f"Client disconnected ({addr[0]}:{addr[1]})")
 
     def _run_in_nuke(self, func, *args):
         """Call func in Nuke's main thread (GUI) or via queue (headless)."""
@@ -790,32 +861,34 @@ class NukeMCPServer:
         return func(*args)
 
     def _handle_client(self, client: socket.socket):
-        global _event_client_socket
         client.settimeout(None)
-        _event_client_socket = client
-        self._client = client
-
-        # Send handshake
-        handshake = self._run_in_nuke(_handshake_data)
-        if not isinstance(handshake, dict):
-            _event_client_socket = None
-            self._client = None
+        self._clients.add(client)
+        _add_client(client)
+        try:
+            self._client_loop(client)
+        finally:
+            _remove_client(client)
+            self._clients.discard(client)
             try:
                 client.close()
             except OSError:
                 pass
+
+    def _client_loop(self, client: socket.socket):
+        # Send handshake
+        handshake = self._run_in_nuke(_handshake_data)
+        if not isinstance(handshake, dict):
             return
         self._send(client, handshake)
 
         buffer = b""
-        rejected = False
-        while self._running and not rejected:
+        while self._running:
             try:
                 chunk = client.recv(1024 * 1024)
             except OSError:
-                break
+                return
             if not chunk:
-                break
+                return
 
             buffer += chunk
             while b"\n" in buffer:
@@ -829,8 +902,7 @@ class NukeMCPServer:
                 except (UnicodeDecodeError, ValueError) as e:
                     self._send(client, {"status": "error", "error": f"Invalid JSON, closing: {e}"})
                     self._emit_log("Rejected non-JSON input; connection closed")
-                    rejected = True
-                    break
+                    return
 
                 cmd_type = command.get("type", "")
                 params = command.get("params", {})
@@ -845,23 +917,15 @@ class NukeMCPServer:
                     except Exception as e:
                         response = {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
+                # # Echo the request id, so the client can tell this response
+                # # from a late one to a request it already gave up on.
+                if "id" in command:
+                    response = dict(response, id=command["id"])
                 self._send(client, response)
                 self._emit_log(f"-> {response.get('status', '?')}")
 
-        if _event_client_socket is client:
-            _event_client_socket = None
-        self._client = None
-        try:
-            client.close()
-        except OSError:
-            pass
-
     def _send(self, client: socket.socket, data: dict):
-        msg = json.dumps(data) + "\n"
-        try:
-            client.sendall(msg.encode("utf-8"))
-        except OSError:
-            pass
+        _send_to(client, data)
 
     def _emit_log(self, msg: str):
         log.info(msg)
