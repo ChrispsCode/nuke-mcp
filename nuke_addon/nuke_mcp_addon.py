@@ -77,6 +77,36 @@ def _handshake_data() -> dict:
     }
 
 
+def _format_str(fmt) -> str:
+    """Nuke's short format string: "width height pixel_aspect [name]"."""
+    text = f"{fmt.width()} {fmt.height()} {fmt.pixelAspect():g}"
+    if fmt.name():
+        text += f" {fmt.name()}"
+    return text
+
+
+# # Matrix types and their element counts. Indexing gives the same order as
+# # str() (Matrix4 has translation in 12-14). Verified in 15.2 and 17.1.
+_MATRIX_SIZES = {"Matrix3": 9, "Matrix4": 16}
+
+
+def _json_default(obj):
+    """Turn Nuke values json can't handle into plain data.
+
+    Matrix4 knobs (Transform, Camera, Card, Tracker4, Roto, Viewer) and
+    Format knobs (Reformat, Roto, Viewer) are common in get_node_info.
+    """
+    kind = type(obj).__name__
+    try:
+        if kind == "Format":
+            return _format_str(obj)
+        if kind in _MATRIX_SIZES:
+            return [obj[i] for i in range(_MATRIX_SIZES[kind])]
+    except Exception:  # noqa: BLE001 - any odd value still goes out as text
+        return str(obj)
+    return str(obj)
+
+
 def _handle_ping(params: dict) -> dict:
     return {"status": "ok", "result": "pong"}
 
@@ -84,11 +114,7 @@ def _handle_ping(params: dict) -> dict:
 def _handle_get_script_info(params: dict) -> dict:
     nuke = _get_nuke()
     root = nuke.root()
-    fmt = root.format()
-    # Nuke's short format string: "width height pixel_aspect [name]"
-    format_str = f"{fmt.width()} {fmt.height()} {fmt.pixelAspect():g}"
-    if fmt.name():
-        format_str += f" {fmt.name()}"
+    format_str = _format_str(root.format())
     return {
         "status": "ok",
         "result": {
@@ -573,12 +599,12 @@ def _remove_client(client: socket.socket):
 def _to_json(data: dict) -> str:
     """Serialise a message, never raising.
 
-    Knob values include Nuke objects (a Viewer's Matrix4 wipe_position, Format
-    knobs), so they go out as their str(). Before this, one such value raised
-    out of the socket thread and killed the server until Nuke restarted.
+    Knob values include Nuke objects (Matrix4, Format), converted by
+    _json_default. Before this, one such value raised out of the socket thread
+    and killed the server until Nuke restarted.
     """
     try:
-        return json.dumps(data, default=str)
+        return json.dumps(data, default=_json_default)
     except (TypeError, ValueError) as e:
         error = {"status": "error", "error": f"Response could not be serialised: {e}"}
         if isinstance(data, dict) and "id" in data:
